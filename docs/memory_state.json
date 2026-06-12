@@ -1,0 +1,168 @@
+{
+  "project": "bankguard-ai",
+  "updatedAt": "2026-06-12",
+  "toolchain": {
+    "runtime": "bun",
+    "next": "15.5.19",
+    "prisma": "7.8.0",
+    "tailwind": "4.3.0",
+    "typescript": "5.9.3",
+    "zod": "3.25.76"
+  },
+  "invariants": [
+    "no-src-directory",
+    "bun-only-execution",
+    "no-raw-hex-outside-globals-css",
+    "verbatim-bank-language-in-font-mono",
+    "prisma-singleton-via-lib-prisma",
+    "zod-validated-stage-payloads",
+    "citation-tier-from-db-only"
+  ],
+  "features": {
+    "design-tokens": {
+      "status": "done",
+      "files": [
+        "app/globals.css"
+      ]
+    },
+    "prisma-layer": {
+      "status": "done",
+      "files": [
+        "prisma.config.ts",
+        "prisma/schema.prisma",
+        "prisma/sql/0001_pgvector.sql",
+        "lib/prisma.ts"
+      ]
+    },
+    "contract-stage1-extract": {
+      "status": "done",
+      "version": "extract.v1",
+      "files": [
+        "workflows/contracts/extract.contract.ts"
+      ]
+    },
+    "contract-stage2-classify": {
+      "status": "done",
+      "version": "classify.v1",
+      "files": [
+        "workflows/contracts/classify.contract.ts"
+      ]
+    },
+    "contract-stage3-diagnose": {
+      "status": "done",
+      "version": "diagnose.v1",
+      "files": [
+        "workflows/contracts/diagnose.contract.ts"
+      ]
+    },
+    "pipeline-engine": {
+      "status": "done",
+      "files": [
+        "workflows/engine.ts",
+        "scripts/smoke-pipeline.ts"
+      ]
+    },
+    "phase1-engineering-hardening": {
+      "status": "done",
+      "files": [
+        "workflows/contracts/runner.ts",
+        "workflows/job-payloads.ts",
+        "workflows/queue.ts",
+        "workflows/persistence.ts",
+        "workflows/lightweight-report.ts",
+        "workflows/worker.ts",
+        "lib/iso.ts",
+        "lib/storage.ts",
+        "lib/api.ts",
+        "prisma/schema.prisma"
+      ]
+    },
+    "ui-confidence-badge": {
+      "status": "done",
+      "files": [
+        "components/ui/confidence-badge.tsx"
+      ]
+    },
+    "ui-verbatim-quote": {
+      "status": "done",
+      "files": [
+        "components/ui/verbatim-quote.tsx"
+      ]
+    },
+    "ui-citation-card": {
+      "status": "done",
+      "files": [
+        "components/ui/citation-card.tsx"
+      ]
+    },
+    "ui-trigger-bar": {
+      "status": "done",
+      "files": [
+        "components/ui/trigger-bar.tsx"
+      ]
+    },
+    "api-v1-headless": {
+      "status": "done",
+      "files": [
+        "app/api/v1/**",
+        "lib/api.ts",
+        "docs/mobile-api-blueprint.md"
+      ]
+    },
+    "cursor-rules": {
+      "status": "done",
+      "files": [
+        ".cursor/rules/tech-stack.mdc",
+        ".cursor/rules/design-system.mdc",
+        ".cursor/rules/pipeline-contracts.mdc"
+      ]
+    },
+    "claude-md": {
+      "status": "done",
+      "files": [
+        "CLAUDE.md"
+      ]
+    }
+  },
+  "dataHooks": {
+    "prisma-singleton": "lib/prisma.ts exports { prisma } \u2014 adapter-pg over DATABASE_URL",
+    "pipeline-jobs": "PipelineJob table; workers claim queued or stale RUNNING jobs via FOR UPDATE SKIP LOCKED, default lease 300000 ms, nullable idempotencyKey prevents duplicate downstream jobs",
+    "pipeline-failure-state": "Terminal PipelineJob failures set JobStatus.FAILED and atomically set CaseStatus.FAILED plus Case.failureReason when a case can be resolved",
+    "short-circuit-report": "Diagnosis.report stores lightweight-report.v1 before CaseStatus.REVIEW; diagnosis and letter are explicitly SKIPPED and sonnetCallAvoided is true",
+    "api-auth-boundary": "All /api/v1 routes except health fail closed with 401 until hashed org-token persistence, verification, revocation, and tenant resolution are implemented",
+    "stage-payload-columns": {
+      "extraction": "Document.extraction (Json) + extractionVersion/Model",
+      "classification": "Diagnosis.triggerProbabilities/topTrigger/classifierVersion",
+      "diagnosis-report": "Diagnosis.report (Json) + reportVersion/Model + citedChunkIds",
+      "letters": "GeneratedLetter.body + complianceGatePassed (export gate keys off this field)"
+    }
+  },
+  "buildChanges": [
+    {
+      "date": "2026-06-12",
+      "change": "Repo initialized: scaffold, Prisma 7 layer, stage 1-2 contracts, tokens, 3 UI primitives. All verification green (tsc, lint:tokens, prisma validate/generate, next build)."
+    },
+    {
+      "date": "2026-06-12",
+      "change": "Prisma generator output relocated src/generated -> lib/generated (no-src invariant). PrismaClient wired through @prisma/adapter-pg (engine-less client requires adapter)."
+    },
+    {
+      "date": "2026-06-12",
+      "change": "Workspace automation: .cursor/rules (3 mdc), CLAUDE.md, memory_state.json, headless /app/api/v1 scaffold. Weeks 3-4: TriggerBar, diagnose.contract.ts, workflows/engine.ts."
+    },
+    {
+      "date": "2026-06-12",
+      "change": "Weeks 3-4 verified: tsc clean, lint:tokens pass, next build green (8 /api/v1 dynamic routes), smoke-pipeline 14/14 (full handoff, short-circuit, compliance gate rejection). Zod input schemas relocated from route files to lib/api-schemas.ts (Next route-export constraint)."
+    },
+    {
+      "date": "2026-06-12",
+      "change": "Phase 1 hardening verified: 36 Bun tests, Prisma validate/generate, strict TypeScript, token lint, Next production build without the prior tracing-root warning, and pipeline smoke checks all passed. Includes contract repair/probability validation, current ISO normalization, filesystem containment, fail-closed API auth, stale job reclaim, transactional/idempotent workflow persistence, terminal case failure state, and lightweight-report.v1."
+    }
+  ],
+  "nextTargets": [
+    "Short-circuit gate counter instrumentation (sonnet calls avoided >= 15%)",
+    "Parallel RAG retrieval seeded from phrase categories (week 6)",
+    "Hashed org-scoped API token persistence, safe verification, revocation, tenant resolution, and rate limits for /app/api/v1",
+    "iOS (Swift) + Android clients consuming /api/v1"
+  ]
+}

@@ -1,0 +1,36 @@
+---
+description: BankGuard AI toolchain invariants — Next.js 15 App Router, Prisma 7, PostgreSQL, Bun-only execution
+globs:
+alwaysApply: true
+---
+
+# Tech Stack Rules (zero tolerance for deviation)
+
+## Runtime & package management
+- **Bun ONLY.** Every install, script, generator, and one-off execution goes through `bun` / `bun x`. NEVER emit `npm`, `npx`, `yarn`, or `pnpm` in code, scripts, docs, or instructions.
+- Canonical commands: `bun install`, `bun run dev`, `bun run build`, `bun run typecheck`, `bun run lint:tokens`, `bun run db:generate`, `bun run db:migrate`, `bun scripts/<file>.ts`.
+
+## Directory architecture
+- **STRICTLY NO `src/` DIRECTORY.** All application code lives at the workspace root:
+  - `/app` — Next.js 15 App Router (pages, layouts, `/app/api/v1` headless REST layer)
+  - `/components` and `/components/ui` — ShadCN-style UI primitives
+  - `/lib` — shared utilities, Prisma singleton, generated client (`/lib/generated/prisma`)
+  - `/workflows` — pipeline contracts, engine, background workers (deployed separately; excluded from Next tracing)
+  - `/prisma` — schema + migrations + raw SQL companions
+  - `/docs` — local state memory (`fable_memory.md`, `memory_state.json`)
+- Path alias `@/*` maps to the workspace root (see tsconfig.json).
+
+## Prisma 7 patterns
+- Configuration lives in root-level **`prisma.config.ts`** (schema path, migrations path, datasource URL from env via dotenv). The connection URL NEVER appears in `schema.prisma`.
+- Generator is `prisma-client` (engine-less) with `output = "../lib/generated/prisma"`.
+- **NEVER instantiate bare `new PrismaClient()`** — it will not compile. The client requires a driver adapter. Always import the singleton: `import { prisma } from "@/lib/prisma"` (it wires `@prisma/adapter-pg` with `DATABASE_URL`).
+- pgvector columns use `Unsupported("vector(1024)")`; HNSW index + extensions live in `prisma/sql/0001_pgvector.sql`.
+- Money is integer cents (`BigInt`/`Int`), timestamps are timestamptz, IDs are Postgres `gen_random_uuid()` UUIDs.
+
+## TypeScript
+- Strict mode plus `noUncheckedIndexedAccess` and `noImplicitOverride`. Never weaken compiler flags to silence an error — fix the type.
+- Zod schemas are the source of truth for all pipeline payloads; derive types with `z.infer`, never duplicate interfaces by hand.
+
+## Next.js 15
+- App Router only; no `pages/`. Route handler dynamic params are async: `{ params }: { params: Promise<{ id: string }> }`.
+- Server Components by default; add `"use client"` only for interactive primitives.

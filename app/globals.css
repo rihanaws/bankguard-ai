@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+/*
+ * BankGuard AI design tokens — bg-ds v1.
+ * THE ONLY FILE in this repo where raw hex values are permitted.
+ * Components must use semantic utilities derived from these tokens
+ * (bg-ink-900, text-conf-low, border-tier-a, font-mono, ...).
+ * CI: scripts/check-no-raw-hex.sh fails the build on hex anywhere else.
+ */
+@theme {
+  /* neutrals (slate-ink scale, dark-first) */
+  --color-ink-950: #0b0f14; /* app background (dark) */
+  --color-ink-900: #111722; /* surface */
+  --color-ink-800: #1a2332; /* raised surface / cards */
+  --color-ink-700: #283349; /* borders, dividers */
+  --color-ink-400: #6b7a94; /* secondary text */
+  --color-ink-200: #c3cad6; /* primary text on dark */
+  --color-ink-50: #f4f6f9; /* light-mode background */
+
+  /* brand colors */
+  --color-brand-500: #3d7eff; /* primary action — "clarity blue" */
+  --color-brand-600: #2c63d6; /* hover */
+  --color-brand-300: #8ab0ff; /* focus rings, links on dark */
+
+  /* semantic risk & confidence bands */
+  --color-risk-critical: #e5484d; /* score 0–39, blocking factors */
+  --color-risk-elevated: #f0883e; /* score 40–69, friction factors */
+  --color-risk-moderate: #f5d90a; /* score 70–84 */
+  --color-risk-clear: #46a758; /* score 85–100 */
+  --color-conf-high: #46a758; /* confidenceBand HIGH */
+  --color-conf-medium: #f0883e; /* MEDIUM */
+  --color-conf-low: #6b7a94; /* LOW — generic honesty gray */
+
+  /* citation tiers */
+  --color-tier-a: #3d7eff; /* regulatory authority citations */
+  --color-tier-b: #9a6ff0; /* empirical/community pattern citations */
+
+  /* typography configuration */
+  --font-display: "Geist", system-ui, sans-serif;
+  --font-body: "Geist", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+  --text-score: 3.5rem;
+  --text-h1: 1.75rem;
+  --text-h2: 1.25rem;
+  --text-body: 0.9375rem; /* 15px data-dense default */
+  --text-caption: 0.8125rem;
+  --leading-body: 1.55;
+
+  /* metrics */
+  --spacing: 0.25rem;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-raised: 0 1px 3px rgb(0 0 0 / 0.4);
+  --shadow-overlay: 0 8px 30px rgb(0 0 0 / 0.5);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-ink-950);
+    color: var(--color-ink-200);
+    font-family: var(--font-body);
+    font-size: var(--text-body);
+    line-height: var(--leading-body);
+  }
+}

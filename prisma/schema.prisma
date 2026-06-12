@@ -1,0 +1,551 @@
+// BankGuard AI — Prisma schema (Postgres 16 + pgvector)
+// Conventions:
+//  - Multi-tenant from day 1: every business row carries orgId; enforce via
+//    Prisma middleware / RLS at Phase 2.
+//  - All money in integer cents (USD), all timestamps timestamptz (Prisma default).
+//  - pgvector columns use Unsupported(); see migrations/0001_pgvector.sql notes
+//    at bottom of this file.
+//  - Generator output lives under /lib/generated — this repo has NO src/ directory.
+
+generator client {
+  provider        = "prisma-client"
+  output          = "../lib/generated/prisma"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [vector, pgcrypto]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TENANCY & AUTH (NextAuth v5 adapter-compatible)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Org {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  slug      String   @unique
+  plan      OrgPlan  @default(INTERNAL_ALPHA)
+  // OFAC screening status of the org itself (Phase 2 requirement)
+  sanctionsScreenedAt DateTime?
+  sanctionsStatus     SanctionsStatus @default(UNSCREENED)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  memberships     Membership[]
+  cases           Case[]
+  riskAssessments RiskAssessment[]
+  auditLogs       AuditLog[]
+
+  @@index([deletedAt])
+}
+
+enum OrgPlan {
+  INTERNAL_ALPHA
+  FREE
+  DIAGNOSTIC_PACK // one-off purchase
+  STARTER
+  ADVISOR
+}
+
+enum SanctionsStatus {
+  UNSCREENED
+  CLEAR
+  POTENTIAL_MATCH // manual review required; block analysis features
+  BLOCKED
+}
+
+model User {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  memberships Membership[]
+  accounts    Account[]
+  sessions    Session[]
+  auditLogs   AuditLog[]
+}
+
+model Membership {
+  id     String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId  String  @db.Uuid
+  userId String  @db.Uuid
+  role   OrgRole @default(OWNER)
+
+  org  Org  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@index([userId])
+}
+
+enum OrgRole {
+  OWNER
+  MEMBER
+  ADVISOR_VIEWER // Phase 2: lawyer/consultant read-only seat
+}
+
+// NextAuth v5 standard tables
+model Account {
+  id                String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String  @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionToken String   @unique
+  userId       String   @db.Uuid
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REACTIVE ENGINE: cases, documents, extractions, diagnoses
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Case {
+  id        String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String     @db.Uuid
+  title     String // e.g. "Payoneer closure — TechSci Inc — 2025-11"
+  status    CaseStatus @default(INTAKE)
+  // Denormalized business context at time of closure (snapshot, not FK —
+  // entity facts change; the case must preserve what was true then)
+  entityName        String?
+  entityType        EntityType?
+  entityState       String? // "DE", "FL", "WY"
+  ownerResidencyIso String? // "BD"
+  mccCode           String? // "7372"
+  bankProfileId     String?  @db.Uuid
+  fundsHeldCents    BigInt?
+  fundsReleasedAt   DateTime?
+  closureNoticedAt  DateTime?
+  closureEffectiveAt DateTime?
+  outcome           CaseOutcome @default(PENDING)
+  outcomeNotes      String?     @db.Text
+  // User consent to anonymize + add this case to the Track B corpus
+  corpusOptIn Boolean @default(false)
+  failureReason String? @db.Text
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  org         Org          @relation(fields: [orgId], references: [id])
+  bankProfile BankProfile? @relation(fields: [bankProfileId], references: [id])
+  documents   Document[]
+  diagnoses   Diagnosis[]
+  letters     GeneratedLetter[]
+
+  @@index([orgId, status])
+  @@index([bankProfileId])
+  @@index([deletedAt])
+}
+
+enum CaseStatus {
+  INTAKE      // created, awaiting documents
+  EXTRACTING  // pipeline stage 1 running
+  CLASSIFYING // pipeline stage 2 running
+  DIAGNOSING  // pipeline stage 3 (RAG + Sonnet) running
+  REVIEW      // report ready
+  CLOSED
+  FAILED
+}
+
+enum CaseOutcome {
+  PENDING
+  FUNDS_RELEASED
+  ACCOUNT_REINSTATED
+  FUNDS_HELD_ESCALATED
+  REGULATOR_COMPLAINT_FILED
+  ABANDONED
+}
+
+enum EntityType {
+  LLC_SINGLE_MEMBER
+  LLC_MULTI_MEMBER
+  C_CORP
+  S_CORP
+  SOLE_PROP
+  OTHER
+}
+
+model Document {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId    String       @db.Uuid
+  kind      DocumentKind
+  // Object storage key, never a public URL. Bucket is private; serve via
+  // short-lived signed URLs only.
+  storageKey   String
+  filename     String
+  mimeType     String
+  sizeBytes    Int
+  sha256       String  @unique // dedupe + integrity
+  pageCount    Int?
+  // Stage 1 output — full structured extraction JSON (versioned contract)
+  extraction        Json?
+  extractionVersion String? // e.g. "extract.v1"
+  extractionModel   String? // e.g. "claude-haiku-4-5-20251001"
+  extractedAt       DateTime?
+  extractionError   String?  @db.Text
+  createdAt DateTime @default(now())
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+}
+
+enum DocumentKind {
+  TERMINATION_LETTER
+  RESTRICTION_NOTICE
+  BANK_EMAIL
+  PORTAL_SCREENSHOT
+  SUPPORTING_DOC // invoices, MSAs, KYB responses the user sent the bank
+  OTHER
+}
+
+model Diagnosis {
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId String @db.Uuid
+  // Stage 2 output: probability distribution over the trigger taxonomy.
+  // Shape: { "AML_SAR": 0.42, "SANCTIONS_GEO": 0.31, ... } — must sum ~1.0
+  triggerProbabilities Json
+  topTrigger           ClosureTrigger
+  topTriggerConfidence Float // 0–1, calibrated band not raw logit
+  classifierVersion    String // "classify.v1"
+  classifierModel      String
+  // Stage 3 output: full report JSON (probable_reasons[], regulatory_basis[]
+  // with kb_chunk citations, recommended_actions[], caveats[])
+  report          Json?
+  reportVersion   String?
+  reportModel     String? // e.g. "claude-sonnet-4-6"
+  // Every kb chunk cited, for audit + retrieval-quality evals
+  citedChunkIds   String[] @db.Uuid
+  promptTokens    Int?
+  completionTokens Int?
+  latencyMs       Int?
+  sourceJobId     String?  @unique @db.Uuid
+  createdAt       DateTime @default(now())
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId, createdAt])
+  @@index([topTrigger])
+}
+
+enum ClosureTrigger {
+  AML_SAR
+  SANCTIONS_GEO
+  KYC_FAILURE
+  FRAUD_CHARGEBACK
+  FEE_OPERATIONAL
+  DERISKING_CATEGORY
+  POLICY_UPDATE
+  UNKNOWN
+}
+
+model GeneratedLetter {
+  id        String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseId    String     @db.Uuid
+  kind      LetterKind
+  // Markdown body. Regenerations create new rows (immutable versions).
+  body      String   @db.Text
+  model     String
+  version   String // "letter.v1"
+  // Hard compliance check result: letter must not allege/reference SARs,
+  // must carry the informational-not-legal-advice footer. Stored so we can
+  // prove every shipped letter passed the gate.
+  complianceGatePassed Boolean
+  complianceGateNotes  String? @db.Text
+  sourceJobId           String? @unique @db.Uuid
+  createdAt DateTime @default(now())
+
+  case Case @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+}
+
+enum LetterKind {
+  BANK_APPEAL
+  FUNDS_RELEASE_DEMAND
+  CFPB_COMPLAINT
+  OCC_COMPLAINT
+  STATE_REGULATOR_COMPLAINT
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KNOWLEDGE BASE (RAG) — Track A regulatory + Track B empirical
+// ─────────────────────────────────────────────────────────────────────────────
+
+model KbDocument {
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  track      KbTrack
+  sourceType KbSourceType
+  // Citation authority. Prompt contract: TIER_A cited as authority;
+  // TIER_B cited only as "observed pattern (n=X community reports)".
+  reliabilityTier ReliabilityTier
+  title           String
+  sourceUrl       String?
+  regulator       String? // "FinCEN", "OCC", "CFPB", "OFAC", "FFIEC"
+  bankSlug        String? // FK-by-slug to BankProfile for ToS docs
+  jurisdiction    String  @default("US-FED") // "US-FED", "US-FL", "US-NY"
+  effectiveFrom   DateTime?
+  effectiveTo     DateTime? // null = currently in force
+  fetchedAt       DateTime
+  contentSha256   String   // re-crawl change detection
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  chunks KbChunk[]
+
+  @@unique([sourceUrl, contentSha256])
+  @@index([track, jurisdiction])
+  @@index([bankSlug])
+  @@index([effectiveFrom, effectiveTo])
+}
+
+enum KbTrack {
+  REGULATORY // Track A
+  EMPIRICAL  // Track B
+}
+
+enum KbSourceType {
+  STATUTE_REGULATION // 31 CFR, 12 CFR sections
+  REGULATOR_GUIDANCE // FFIEC manual, FinCEN advisories, SAR FAQs
+  ENFORCEMENT_ACTION
+  BANK_TOS
+  BANK_HELP_CENTER
+  COMMUNITY_CASE // structured extraction, never verbatim post text
+  NEWS_ANALYSIS
+}
+
+enum ReliabilityTier {
+  TIER_A // citable as authority
+  TIER_B // citable as observed pattern only
+}
+
+model KbChunk {
+  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kbDocumentId String @db.Uuid
+  ordinal      Int
+  // 200–500 token chunks anchored to headings/section numbers
+  heading     String?
+  sectionRef  String? // "31 CFR 1020.320(e)", "ToS §11.2"
+  content     String  @db.Text
+  tokenCount  Int
+  // voyage-3-large / text-embedding dim — keep in sync with EMBED_DIM env
+  embedding Unsupported("vector(1024)")?
+  createdAt DateTime @default(now())
+
+  kbDocument KbDocument @relation(fields: [kbDocumentId], references: [id], onDelete: Cascade)
+
+  @@unique([kbDocumentId, ordinal])
+  @@index([kbDocumentId])
+}
+
+// Track B structured case extraction — the moat + future classifier training set.
+// NEVER stores verbatim post text or usernames. PII stripped at ingestion.
+model CommunityCase {
+  id           String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kbDocumentId String? @db.Uuid // link to its KB entry if vectorized
+  sourceUrl    String  @unique
+  sourcePlatform String // "reddit", "hn", "bbb", "trustpilot"
+  postedAt     DateTime?
+  bankSlug     String?
+  sponsorBankSlug String?
+  userGeoIso   String? // poster's stated country
+  entityType   EntityType?
+  mccGuess     String?
+  // Ordered trigger events: ["dormant_6mo", "wire_in_45k_EU", "freeze_24h"]
+  triggerEvents  String[]
+  letterPhrases  String[] // verbatim ONLY for quoted bank-letter language
+  noticeDays     Int?
+  fundsHeldDays  Int?
+  fundsHeldCents BigInt?
+  outcome        CaseOutcome?
+  // Hand-labeled (or LLM-labeled, human-verified) trigger for classifier training
+  labeledTrigger ClosureTrigger?
+  labelVerified  Boolean @default(false)
+  extractedAt    DateTime @default(now())
+  extractionModel String?
+
+  @@index([bankSlug])
+  @@index([labeledTrigger, labelVerified])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROACTIVE ENGINE: bank appetite + bankability scoring
+// ─────────────────────────────────────────────────────────────────────────────
+
+model BankProfile {
+  id   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug String @unique // "mercury", "relay", "rho", "wise", "payoneer", "brex"
+  name String
+  kind BankKind
+  // Critical signal: termination by one sponsor's fintech predicts rejection
+  // across all fintechs on that sponsor.
+  sponsorBankSlugs String[] // ["choice-financial", "evolve"]
+  nraEligible      Boolean
+  requiresUsAddress Boolean  @default(false)
+  requiresUsOperations Boolean @default(false)
+  restrictedGeoIso String[] // observed/published restricted countries
+  mccBlocklist     String[]
+  mccGreylist      String[] // accepted with friction/EDD
+  // Free-form curated notes: observed closure patterns, EDD behavior,
+  // funds-hold behavior, appeal responsiveness
+  appetiteNotes String? @db.Text
+  dataAsOf      DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  cases           Case[]
+  riskAssessments RiskAssessmentBankScore[]
+
+  @@index([nraEligible])
+}
+
+enum BankKind {
+  CHARTERED_BANK
+  NEOBANK_BAAS // fintech on sponsor charter
+  EMI_MSB      // Wise, Payoneer
+  PSP          // Stripe — merchant side
+}
+
+model RiskAssessment {
+  id    String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId String @db.Uuid
+  // Immutable input snapshot — scoring must be reproducible
+  input Json // { entityType, entityState, ownerResidencyIso, mcc, corridors[], monthlyVolumeCents, addressKind, ... }
+  // Deterministic engine output (LLM never computes the score)
+  scoreVersion    String // "bankability.v1" — bump on any weight change
+  aggregateScore  Int // 0–100, higher = more bankable
+  factorBreakdown Json // [{ factor, weight, rawValue, points, rationale }]
+  // LLM-generated plain-language explanation of the deterministic result
+  explanation      String? @db.Text
+  explanationModel String?
+  createdAt DateTime @default(now())
+
+  org        Org                       @relation(fields: [orgId], references: [id])
+  bankScores RiskAssessmentBankScore[]
+
+  @@index([orgId, createdAt])
+}
+
+model RiskAssessmentBankScore {
+  id               String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  riskAssessmentId String @db.Uuid
+  bankProfileId    String @db.Uuid
+  compatibilityScore Int // 0–100 fit for THIS bank
+  blockingFactors    String[] // hard nos: ["restricted_geo:BD"]
+  frictionFactors    String[] // EDD-likely: ["mcc_greylist:7372"]
+  rank               Int
+
+  riskAssessment RiskAssessment @relation(fields: [riskAssessmentId], references: [id], onDelete: Cascade)
+  bankProfile    BankProfile    @relation(fields: [bankProfileId], references: [id])
+
+  @@unique([riskAssessmentId, bankProfileId])
+  @@index([bankProfileId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id     String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId  String? @db.Uuid
+  userId String? @db.Uuid
+  action String // "case.create", "document.upload", "letter.generate", "kb.ingest"
+  target String? // entity id
+  meta   Json?
+  ip     String?
+  createdAt DateTime @default(now())
+
+  org  Org?  @relation(fields: [orgId], references: [id])
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([orgId, createdAt])
+  @@index([action])
+}
+
+model PipelineJob {
+  id      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kind    JobKind
+  status  JobStatus @default(QUEUED)
+  payload Json // { caseId } | { documentId } | { kbDocumentId } | crawl spec
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  idempotencyKey String? @unique
+  lastError   String?   @db.Text
+  lockedAt    DateTime? // worker lease (Hetzner workers poll w/ SKIP LOCKED)
+  lockedBy    String?
+  runAfter    DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([status, runAfter])
+  @@index([kind, status])
+}
+
+enum JobKind {
+  EXTRACT_DOCUMENT
+  CLASSIFY_CASE
+  DIAGNOSE_CASE
+  GENERATE_LETTER
+  KB_CRAWL
+  KB_EMBED
+  COMMUNITY_SCRAPE
+  SANCTIONS_SCREEN
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  DEAD // exceeded maxAttempts
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION NOTES (run as raw SQL in the first migration, after `prisma migrate`)
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgcrypto;
+// 2. HNSW index for chunk retrieval (cosine):
+//      CREATE INDEX kb_chunk_embedding_hnsw ON "KbChunk"
+//      USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+// 3. Job queue claim query (worker side):
+//      UPDATE "PipelineJob" SET status='RUNNING', "lockedAt"=now(), "lockedBy"=$1
+//      WHERE id = ( SELECT id FROM "PipelineJob"
+//                   WHERE status='QUEUED' AND "runAfter" <= now()
+//                   ORDER BY "createdAt" FOR UPDATE SKIP LOCKED LIMIT 1 )
+//      RETURNING *;
